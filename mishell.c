@@ -23,8 +23,14 @@ int main() {
         // Remove the newline character added by fgets
         input[strcspn(input, "\n")] = '\0';
 
-        // Display the text entered by the user
-        printf("%s\n", input);
+        // Tokenize and display each word
+        char* token;
+        char* rest = input;
+        while ((token = strsep(&rest, " \t")) != NULL) {
+            if (strlen(token) > 0) {
+                printf("%s\n", token);
+            }
+        }
     }
 
     return 0;
