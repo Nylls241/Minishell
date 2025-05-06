@@ -1,4 +1,4 @@
-# MP1 - MiShell
+# MiShell
 
 ## Overview
 MiShell is a simple shell implementation in C that provides basic shell functionality with additional features. This project demonstrates fundamental concepts of operating systems, and process manipulation.
