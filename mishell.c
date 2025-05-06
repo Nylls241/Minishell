@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 /**
  * @brief Main function of the shell
@@ -54,14 +56,44 @@ int main() {
             } else {
                 fprintf(stderr, "cd: missing argument\n");
             }
-            continue; // Skip token printing
+            continue;
         }
 
-        // Tokenize and display all arguments
-        char *rest = cmd; // start from cmd already
-        while (rest != NULL) {
-            printf("%s\n", rest);
-            rest = strtok(NULL, " \t");
+        // Fork a child process to execute other commands
+        pid_t pid = fork();
+
+        if (pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) {
+            // Code for the child process
+
+            // Tokenize input for execvp
+            char *token;
+            char *args[256];
+            int i = 0;
+
+            token = cmd;
+            args[i++] = token;
+
+            while ((token = strtok(NULL, " \t")) != NULL) {
+                args[i++] = token;
+            }
+
+            args[i] = NULL; // Null-terminate the args array
+
+            // Execute the command
+            if (execvp(args[0], args) == -1) {
+                perror("execvp");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            // Parent process waits for child
+            int status;
+            if (waitpid(pid, &status, 0) == -1) {
+                perror("waitpid");
+                exit(EXIT_FAILURE);
+            }
         }
     }
 
