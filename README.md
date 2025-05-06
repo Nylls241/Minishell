@@ -24,8 +24,8 @@ MiShell is a simple shell implementation in C that provides basic shell function
 ### Compiling
 ```bash
 # Clone the repository
-git clone the repo (nylls.gersan.boutoto) on Gitlab
-cd MP1
+git clone the repo https://github.com/Nylls241/Minishell.git
+cd Minishell/
 
 # Compile the project
 make
