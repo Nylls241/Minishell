@@ -20,6 +20,51 @@ char *trim(char *str) {
 }
 
 /**
+ * @brief Expand environment variables in a string
+ * @param str The string to expand
+ * @param result Buffer to store the expanded result
+ * @param size Size of the result buffer
+ */
+void expand_env_vars(const char *str, char *result, size_t size) {
+    size_t i = 0;
+    size_t j = 0;
+    
+    while (str[i] != '\0' && j < size - 1) {
+        if (str[i] == '$' && str[i+1] != '\0' && str[i+1] != ' ' && str[i+1] != '\t') {
+            // Extract variable name
+            i++;
+            char var_name[256] = {0};
+            size_t var_len = 0;
+            
+            // Collect characters until space, tab, $, or end of string
+            while (str[i] != '\0' && str[i] != ' ' && str[i] != '\t' && str[i] != '$' && var_len < 255) {
+                var_name[var_len++] = str[i++];
+            }
+            var_name[var_len] = '\0';
+            
+            // Get environment variable value
+            const char *value = getenv(var_name);
+            if (value) {
+                // Copy the value to result
+                size_t value_len = strlen(value);
+                if (j + value_len < size - 1) {
+                    strcpy(result + j, value);
+                    j += value_len;
+                } else {
+                    // Not enough space
+                    break;
+                }
+            }
+        } else {
+            // Copy regular character
+            result[j++] = str[i++];
+        }
+    }
+    
+    result[j] = '\0';
+}
+
+/**
  * @brief Parse a single command and handle its redirections
  * @param cmd The command string to parse
  * @param args Array to store the parsed arguments
@@ -62,7 +107,11 @@ int parse_command(char *cmd, char *args[], int *in_fd, int *out_fd, int *err_fd)
         if (end != NULL) *end = '\0';
         filename = trim(filename);
         
-        *in_fd = open(filename, O_RDONLY);
+        // Expand environment variables in filename
+        char expanded_filename[1024];
+        expand_env_vars(filename, expanded_filename, sizeof(expanded_filename));
+        
+        *in_fd = open(expanded_filename, O_RDONLY);
         if (*in_fd == -1) {
             perror("open input");
             return -1;
@@ -77,7 +126,11 @@ int parse_command(char *cmd, char *args[], int *in_fd, int *out_fd, int *err_fd)
         if (end != NULL) *end = '\0';
         filename = trim(filename);
         
-        *out_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        // Expand environment variables in filename
+        char expanded_filename[1024];
+        expand_env_vars(filename, expanded_filename, sizeof(expanded_filename));
+        
+        *out_fd = open(expanded_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (*out_fd == -1) {
             perror("open output");
             return -1;
@@ -92,15 +145,23 @@ int parse_command(char *cmd, char *args[], int *in_fd, int *out_fd, int *err_fd)
         if (end != NULL) *end = '\0';
         filename = trim(filename);
         
-        *err_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        // Expand environment variables in filename
+        char expanded_filename[1024];
+        expand_env_vars(filename, expanded_filename, sizeof(expanded_filename));
+        
+        *err_fd = open(expanded_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (*err_fd == -1) {
             perror("open error");
             return -1;
         }
     }
     
+    // Expand environment variables in command arguments
+    char expanded_cmd[1024];
+    expand_env_vars(cmd, expanded_cmd, sizeof(expanded_cmd));
+    
     // Parse command arguments
-    char *token = strtok(cmd, " \t");
+    char *token = strtok(expanded_cmd, " \t");
     while (token != NULL && arg_count < 255) {
         args[arg_count++] = token;
         token = strtok(NULL, " \t");
@@ -208,6 +269,60 @@ int execute_pipeline(char **commands, int num_commands) {
 }
 
 /**
+ * @brief Handle environment variable commands
+ * @param args Array of command arguments
+ * @return 1 if the command was an environment variable command, 0 otherwise
+ */
+int handle_env_vars(char *args[]) {
+    if (args[0] == NULL) return 0;
+    
+    // Handle "env" command to display all environment variables
+    if (strcmp(args[0], "env") == 0) {
+        extern char **environ;
+        for (char **env = environ; *env != NULL; env++) {
+            printf("%s\n", *env);
+        }
+        return 1;
+    }
+    
+    // Handle "setenv" command
+    if (strcmp(args[0], "setenv") == 0) {
+        if (args[1] == NULL || args[2] == NULL) {
+            fprintf(stderr, "Usage: setenv VARIABLE VALUE\n");
+        } else {
+            if (setenv(args[1], args[2], 1) != 0) {
+                perror("setenv");
+            }
+        }
+        return 1;
+    }
+    
+    // Handle "unsetenv" command
+    if (strcmp(args[0], "unsetenv") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "Usage: unsetenv VARIABLE\n");
+        } else {
+            if (unsetenv(args[1]) != 0) {
+                perror("unsetenv");
+            }
+        }
+        return 1;
+    }
+    
+    // Handle "echo" command with environment variable expansion
+    if (strcmp(args[0], "echo") == 0) {
+        // The command was already expanded in parse_command
+        for (int i = 1; args[i] != NULL; i++) {
+            printf("%s ", args[i]);
+        }
+        printf("\n");
+        return 1;
+    }
+    
+    return 0;
+}
+
+/**
  * @brief Main function of the shell
  * @return 0 if everything goes well
  */
@@ -249,14 +364,59 @@ int main() {
         if (strncmp(trimmed_input, "cd", 2) == 0 && (trimmed_input[2] == ' ' || trimmed_input[2] == '\t' || trimmed_input[2] == '\0')) {
             char *token = strtok(trimmed_input, " \t");
             token = strtok(NULL, " \t");
+            
+            // Expand environment variables in the path
             if (token != NULL) {
-                if (chdir(token) != 0) {
+                char expanded_path[1024];
+                expand_env_vars(token, expanded_path, sizeof(expanded_path));
+                
+                if (chdir(expanded_path) != 0) {
                     perror("chdir");
                 }
             } else {
-                fprintf(stderr, "cd: missing argument\n");
+                // Default to $HOME if no path is specified
+                const char *home_dir = getenv("HOME");
+                if (home_dir != NULL) {
+                    if (chdir(home_dir) != 0) {
+                        perror("chdir");
+                    }
+                } else {
+                    fprintf(stderr, "cd: HOME not set\n");
+                }
             }
             continue;
+        }
+
+        // Check for environment variable commands
+        char *temp_cmd = strdup(trimmed_input);
+        if (temp_cmd == NULL) {
+            perror("strdup");
+            exit(EXIT_FAILURE);
+        }
+        
+        char *temp_args[256];
+        char *token = strtok(temp_cmd, " \t");
+        int arg_count = 0;
+        
+        while (token != NULL && arg_count < 255) {
+            temp_args[arg_count++] = token;
+            token = strtok(NULL, " \t");
+        }
+        temp_args[arg_count] = NULL;
+        
+        if (handle_env_vars(temp_args)) {
+            free(temp_cmd);
+            continue;
+        }
+        
+        free(temp_cmd);
+
+        // Check for background processing
+        int is_background = 0;
+        if (trimmed_input[strlen(trimmed_input) - 1] == '&') {
+            is_background = 1;
+            trimmed_input[strlen(trimmed_input) - 1] = '\0'; // Remove '&'
+            trimmed_input = trim(trimmed_input); // Trim again to remove trailing spaces
         }
 
         // Check for pipes
@@ -265,26 +425,42 @@ int main() {
             perror("strdup");
             exit(EXIT_FAILURE);
         }
-        
+
         // Count the number of pipes
         int num_commands = 1;
         for (char *c = command_copy; *c != '\0'; c++) {
             if (*c == '|') num_commands++;
         }
-        
+
         // Split the input by pipes
         char *commands[num_commands];
         char *cmd_token = strtok(command_copy, "|");
         int cmd_index = 0;
-        
+
         while (cmd_token != NULL && cmd_index < num_commands) {
             commands[cmd_index++] = trim(cmd_token);
             cmd_token = strtok(NULL, "|");
         }
-        
-        // Execute the pipeline
-        execute_pipeline(commands, num_commands);
-        
+
+        if (is_background) {
+            // Fork a child process for background execution
+            pid_t pid = fork();
+            if (pid == -1) {
+                perror("fork");
+            } else if (pid == 0) {
+                // Child process: execute the pipeline
+                execute_pipeline(commands, num_commands);
+                free(command_copy);
+                exit(EXIT_SUCCESS);
+            } else {
+                // Parent process: do not wait for the child
+                printf("[Background process started with PID %d]\n", pid);
+            }
+        } else {
+            // Foreground execution
+            execute_pipeline(commands, num_commands);
+        }
+
         // Free the duplicated string
         free(command_copy);
     }
