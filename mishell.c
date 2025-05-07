@@ -20,6 +20,194 @@ char *trim(char *str) {
 }
 
 /**
+ * @brief Parse a single command and handle its redirections
+ * @param cmd The command string to parse
+ * @param args Array to store the parsed arguments
+ * @param in_fd Input file descriptor (for redirections)
+ * @param out_fd Output file descriptor (for redirections)
+ * @param err_fd Error file descriptor (for redirections)
+ * @return Number of arguments stored in args
+ */
+int parse_command(char *cmd, char *args[], int *in_fd, int *out_fd, int *err_fd) {
+    char *input_redirect = NULL;
+    char *output_redirect = NULL;
+    char *error_redirect = NULL;
+    int arg_count = 0;
+    
+    // Find redirections
+    char *current = cmd;
+    while (*current != '\0') {
+        if (*current == '<' && (current == cmd || *(current-1) != '2')) {
+            input_redirect = current;
+            *current = '\0';
+            current++;
+        } else if (*current == '>' && (current == cmd || *(current-1) != '2')) {
+            output_redirect = current;
+            *current = '\0';
+            current++;
+        } else if (*current == '>' && current > cmd && *(current-1) == '2') {
+            error_redirect = current-1;
+            *(current-1) = '\0';
+            current++;
+        } else {
+            current++;
+        }
+    }
+    
+    // Handle input redirection
+    if (input_redirect != NULL) {
+        char *filename = trim(input_redirect + 1);
+        // Check if the filename has any redirection characters
+        char *end = strpbrk(filename, "<>");
+        if (end != NULL) *end = '\0';
+        filename = trim(filename);
+        
+        *in_fd = open(filename, O_RDONLY);
+        if (*in_fd == -1) {
+            perror("open input");
+            return -1;
+        }
+    }
+    
+    // Handle output redirection
+    if (output_redirect != NULL) {
+        char *filename = trim(output_redirect + 1);
+        // Check if the filename has any redirection characters
+        char *end = strpbrk(filename, "<>");
+        if (end != NULL) *end = '\0';
+        filename = trim(filename);
+        
+        *out_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (*out_fd == -1) {
+            perror("open output");
+            return -1;
+        }
+    }
+    
+    // Handle error redirection
+    if (error_redirect != NULL) {
+        char *filename = trim(error_redirect + 2);  // Skip "2>"
+        // Check if the filename has any redirection characters
+        char *end = strpbrk(filename, "<>");
+        if (end != NULL) *end = '\0';
+        filename = trim(filename);
+        
+        *err_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (*err_fd == -1) {
+            perror("open error");
+            return -1;
+        }
+    }
+    
+    // Parse command arguments
+    char *token = strtok(cmd, " \t");
+    while (token != NULL && arg_count < 255) {
+        args[arg_count++] = token;
+        token = strtok(NULL, " \t");
+    }
+    args[arg_count] = NULL;
+    
+    return arg_count;
+}
+
+/**
+ * @brief Execute a pipeline of commands
+ * @param commands Array of command strings
+ * @param num_commands Number of commands in the pipeline
+ * @return Exit status of the last command
+ */
+int execute_pipeline(char **commands, int num_commands) {
+    int status = 0;
+    int pipes[num_commands-1][2];
+    pid_t pids[num_commands];
+    
+    // Create all necessary pipes
+    for (int i = 0; i < num_commands-1; i++) {
+        if (pipe(pipes[i]) == -1) {
+            perror("pipe");
+            return EXIT_FAILURE;
+        }
+    }
+    
+    // Launch all processes
+    for (int i = 0; i < num_commands; i++) {
+        pids[i] = fork();
+        
+        if (pids[i] == -1) {
+            perror("fork");
+            return EXIT_FAILURE;
+        } else if (pids[i] == 0) {
+            // Child process
+            
+            // Setup file descriptors for redirections
+            int in_fd = STDIN_FILENO;
+            int out_fd = STDOUT_FILENO;
+            int err_fd = STDERR_FILENO;
+            
+            // Handle pipe input (from previous command)
+            if (i > 0) {
+                in_fd = pipes[i-1][0];
+            }
+            
+            // Handle pipe output (to next command)
+            if (i < num_commands-1) {
+                out_fd = pipes[i][1];
+            }
+            
+            // Close all unused pipe ends
+            for (int j = 0; j < num_commands-1; j++) {
+                if (j != i-1) close(pipes[j][0]);
+                if (j != i) close(pipes[j][1]);
+            }
+            
+            char *args[256];
+            int arg_count = parse_command(commands[i], args, &in_fd, &out_fd, &err_fd);
+            
+            if (arg_count <= 0) {
+                fprintf(stderr, "Failed to parse command or empty command\n");
+                exit(EXIT_FAILURE);
+            }
+            
+            // Set up redirections
+            if (in_fd != STDIN_FILENO) {
+                dup2(in_fd, STDIN_FILENO);
+                close(in_fd);
+            }
+            if (out_fd != STDOUT_FILENO) {
+                dup2(out_fd, STDOUT_FILENO);
+                close(out_fd);
+            }
+            if (err_fd != STDERR_FILENO) {
+                dup2(err_fd, STDERR_FILENO);
+                close(err_fd);
+            }
+            
+            // Execute the command
+            execvp(args[0], args);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    // Parent process
+    // Close all pipe ends
+    for (int i = 0; i < num_commands-1; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+    
+    // Wait for all child processes
+    for (int i = 0; i < num_commands; i++) {
+        if (waitpid(pids[i], &status, 0) == -1) {
+            perror("waitpid");
+            return EXIT_FAILURE;
+        }
+    }
+    
+    return WEXITSTATUS(status);
+}
+
+/**
  * @brief Main function of the shell
  * @return 0 if everything goes well
  */
@@ -58,9 +246,9 @@ int main() {
         }
 
         // Handle "cd"
-        if (strncmp(trimmed_input, "cd", 2) == 0) {
-            char *token = strtok(trimmed_input, " ");
-            token = strtok(NULL, " ");
+        if (strncmp(trimmed_input, "cd", 2) == 0 && (trimmed_input[2] == ' ' || trimmed_input[2] == '\t' || trimmed_input[2] == '\0')) {
+            char *token = strtok(trimmed_input, " \t");
+            token = strtok(NULL, " \t");
             if (token != NULL) {
                 if (chdir(token) != 0) {
                     perror("chdir");
@@ -71,124 +259,34 @@ int main() {
             continue;
         }
 
-        // Fork a child process to execute other commands
-        pid_t pid = fork();
-
-        if (pid == -1) {
-            perror("fork");
+        // Check for pipes
+        char *command_copy = strdup(trimmed_input);
+        if (command_copy == NULL) {
+            perror("strdup");
             exit(EXIT_FAILURE);
-        } else if (pid == 0) {
-            // Make a copy of the input for processing
-            char command_copy[1024];
-            strcpy(command_copy, trimmed_input);
-
-            // Check for redirections
-            char *output_redirect = strchr(command_copy, '>');
-            char *input_redirect = strchr(command_copy, '<');
-            char *error_redirect = strstr(command_copy, "2>");
-
-            // Process output redirection
-            if (output_redirect != NULL) {
-                // Handle case where 2> comes before >
-                if (error_redirect != NULL && error_redirect < output_redirect) {
-                    *error_redirect = '\0';  // Cut string at 2>
-                    char *error_file = trim(error_redirect + 2);
-                    
-                    // Find end of error file name
-                    char *end = strchr(error_file, '>');
-                    if (end != NULL) *end = '\0';
-                    error_file = trim(error_file);
-                    
-                    int fd = open(error_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd == -1) {
-                        perror("open");
-                        exit(EXIT_FAILURE);
-                    }
-                    dup2(fd, STDERR_FILENO);
-                    close(fd);
-                    
-                    // Adjust output_redirect position since we modified the string
-                    output_redirect = strchr(command_copy, '>');
-                }
-                
-                *output_redirect = '\0';  // Cut string at >
-                char *output_file = trim(output_redirect + 1);
-                
-                // Find end of output file name if other redirections follow
-                char *end = strchr(output_file, '<');
-                if (end == NULL) end = strstr(output_file, "2>");
-                if (end != NULL) *end = '\0';
-                output_file = trim(output_file);
-                
-                int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd == -1) {
-                    perror("open");
-                    exit(EXIT_FAILURE);
-                }
-                dup2(fd, STDOUT_FILENO);
-                close(fd);
-            }
-
-            // Process input redirection
-            if (input_redirect != NULL) {
-                *input_redirect = '\0';  // Cut string at <
-                char *input_file = trim(input_redirect + 1);
-                
-                // Find end of input file name if other redirections follow
-                char *end = strchr(input_file, '>');
-                if (end != NULL) *end = '\0';
-                input_file = trim(input_file);
-                
-                int fd = open(input_file, O_RDONLY);
-                if (fd == -1) {
-                    perror("open");
-                    exit(EXIT_FAILURE);
-                }
-                dup2(fd, STDIN_FILENO);
-                close(fd);
-            }
-
-            // Process error redirection if not already handled
-            if (error_redirect != NULL && (output_redirect == NULL || error_redirect > output_redirect)) {
-                *error_redirect = '\0';  // Cut string at 2>
-                char *error_file = trim(error_redirect + 2);
-                
-                int fd = open(error_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd == -1) {
-                    perror("open");
-                    exit(EXIT_FAILURE);
-                }
-                dup2(fd, STDERR_FILENO);
-                close(fd);
-            }
-
-            // Tokenize command part (without redirections) for execvp
-            char *token;
-            char *args[256];
-            int i = 0;
-
-            token = strtok(command_copy, " \t");
-            while (token != NULL && i < 255) {
-                args[i++] = token;
-                token = strtok(NULL, " \t");
-            }
-            args[i] = NULL;
-
-            if (i > 0 && execvp(args[0], args) == -1) {
-                perror("execvp");
-                exit(EXIT_FAILURE);
-            } else if (i == 0) {
-                fprintf(stderr, "No command specified\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            // Parent waits
-            int status;
-            if (waitpid(pid, &status, 0) == -1) {
-                perror("waitpid");
-                exit(EXIT_FAILURE);
-            }
         }
+        
+        // Count the number of pipes
+        int num_commands = 1;
+        for (char *c = command_copy; *c != '\0'; c++) {
+            if (*c == '|') num_commands++;
+        }
+        
+        // Split the input by pipes
+        char *commands[num_commands];
+        char *cmd_token = strtok(command_copy, "|");
+        int cmd_index = 0;
+        
+        while (cmd_token != NULL && cmd_index < num_commands) {
+            commands[cmd_index++] = trim(cmd_token);
+            cmd_token = strtok(NULL, "|");
+        }
+        
+        // Execute the pipeline
+        execute_pipeline(commands, num_commands);
+        
+        // Free the duplicated string
+        free(command_copy);
     }
 
     return 0;
